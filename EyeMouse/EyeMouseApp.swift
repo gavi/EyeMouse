@@ -148,6 +148,16 @@ class EyeTrackingManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
         }
     }
     
+    private func moveMouseToRightDisplay() {
+        let screens = NSScreen.screens
+        if let rightScreen = screens.max(by: { $0.frame.origin.x < $1.frame.origin.x }) {
+            let centerX = rightScreen.frame.origin.x + (rightScreen.frame.width / 2)
+            let centerY = rightScreen.frame.origin.y + (rightScreen.frame.height / 2)
+            CGWarpMouseCursorPosition(CGPoint(x: centerX, y: centerY))
+            lastMovementTime = Date()
+        }
+    }
+    
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         
@@ -162,13 +172,19 @@ class EyeTrackingManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
                     let eyeX = leftEye.normalizedPoints[0].x
                     self?.eyePosition = eyeX
                     
-                    // Only move mouse if sufficient time has passed since last movement
-                    if eyeX < 0.4 && (self?.lastEyeX ?? 0) >= 0.4 {
-                        if let lastMove = self?.lastMovementTime,
-                           Date().timeIntervalSince(lastMove) > 1.0 {
-                            self?.moveMouseToLeftDisplay()
-                        }
+                    // Check if sufficient time has passed since last movement
+                    guard let lastMove = self?.lastMovementTime,
+                          Date().timeIntervalSince(lastMove) > 1.0 else { return }
+                    
+                    // Move to left display when looking left (eyeX > 0.6)
+                    if eyeX > 0.6 && (self?.lastEyeX ?? 0) <= 0.6 {
+                        self?.moveMouseToLeftDisplay()
                     }
+                    // Move to right display when looking right (eyeX < 0.4)
+                    else if eyeX < 0.4 && (self?.lastEyeX ?? 0) >= 0.4 {
+                        self?.moveMouseToRightDisplay()
+                    }
+                    
                     self?.lastEyeX = eyeX
                 }
             }
@@ -179,9 +195,143 @@ class EyeTrackingManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSa
     }
 }
 
-// MARK: - Main View
+class MouseTracker: ObservableObject {
+    @Published var mousePosition: CGPoint = .zero
+    private var displayLink: CVDisplayLink?
+    
+    init() {
+        setupDisplayLink()
+    }
+    
+    private let displayLinkOutputCallback: CVDisplayLinkOutputCallback = { displayLink, inNow, inOutputTime, flagsIn, flagsOut, displayLinkContext in
+        
+        let tracker = unsafeBitCast(displayLinkContext, to: MouseTracker.self)
+        tracker.updateMousePosition()
+        return kCVReturnSuccess
+    }
+    
+    private func setupDisplayLink() {
+        CVDisplayLinkCreateWithActiveCGDisplays(&displayLink)
+        if let displayLink = displayLink {
+            let pointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+            CVDisplayLinkSetOutputCallback(displayLink, displayLinkOutputCallback, pointer)
+            CVDisplayLinkStart(displayLink)
+        }
+    }
+    
+    private func updateMousePosition() {
+        let mouseLocation = NSEvent.mouseLocation
+        DispatchQueue.main.async {
+            self.mousePosition = mouseLocation
+        }
+    }
+    
+    deinit {
+        if let displayLink = displayLink {
+            CVDisplayLinkStop(displayLink)
+        }
+    }
+}
+
+struct MonitorLayoutView: NSViewRepresentable {
+    @ObservedObject var mouseTracker: MouseTracker
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = MonitorDrawingView()
+        view.mouseTracker = mouseTracker
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.black.cgColor
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.needsDisplay = true
+    }
+}
+
+class MonitorDrawingView: NSView {
+    var mouseTracker: MouseTracker?
+    
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+        
+        // Find the bounds that encompass all screens
+        let allScreensRect = screens.reduce(screens[0].frame) { result, screen in
+            result.union(screen.frame)
+        }
+        
+        // Calculate scale factor to fit in our view
+        let scaleFactor = min(
+            bounds.width / allScreensRect.width,
+            bounds.height / allScreensRect.height
+        ) * 0.9 // 90% of available space
+        
+        // Calculate offset to center the drawing
+        let offsetX = (bounds.width - (allScreensRect.width * scaleFactor)) / 2
+        let offsetY = (bounds.height - (allScreensRect.height * scaleFactor)) / 2
+        
+        // Save the current graphics state
+        context.saveGState()
+        
+        // Transform coordinates
+        context.translateBy(x: offsetX, y: offsetY)
+        context.scaleBy(x: scaleFactor, y: scaleFactor)
+        context.translateBy(x: -allScreensRect.origin.x, y: -allScreensRect.origin.y)
+        
+        // Draw each screen
+        for (index, screen) in screens.enumerated() {
+            let rect = screen.frame
+            
+            // Draw screen outline
+            context.setStrokeColor(NSColor.white.cgColor)
+            context.setLineWidth(2.0 / scaleFactor)
+            context.stroke(rect)
+            
+            // Fill screen
+            context.setFillColor(NSColor.darkGray.cgColor)
+            context.fill(rect)
+            
+            // Draw screen number and resolution
+            let text = "\(index + 1) (\(Int(screen.frame.width))x\(Int(screen.frame.height)))"
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 12.0 / scaleFactor),
+                .foregroundColor: NSColor.white
+            ]
+            let size = text.size(withAttributes: attributes)
+            let point = NSPoint(
+                x: rect.midX - size.width / 2,
+                y: rect.midY - size.height / 2
+            )
+            text.draw(at: point, withAttributes: attributes)
+        }
+        
+        // Draw mouse cursor position
+        if let mousePosition = mouseTracker?.mousePosition {
+            context.setFillColor(NSColor.red.cgColor)
+            let cursorSize = 10.0 / scaleFactor
+            let cursorRect = CGRect(
+                x: mousePosition.x - cursorSize/2,
+                y: mousePosition.y - cursorSize/2,
+                width: cursorSize,
+                height: cursorSize
+            )
+            context.fillEllipse(in: cursorRect)
+        }
+        
+        // Restore the graphics state
+        context.restoreGState()
+    }
+}
+
+// Update ContentView to include MouseTracker
 struct ContentView: View {
     @StateObject private var eyeTrackingManager = EyeTrackingManager()
+    @StateObject private var mouseTracker = MouseTracker()
     
     var body: some View {
         VStack {
@@ -191,11 +341,18 @@ struct ContentView: View {
                         .frame(height: 240)
                         .cornerRadius(8)
                     
+                    // Monitor Layout with mouse position
+                    MonitorLayoutView(mouseTracker: mouseTracker)
+                        .frame(height: 100)
+                        .cornerRadius(8)
+                        .padding(.vertical)
+                    
                     // Debug info
                     VStack {
                         Text("Eye Position: \(eyeTrackingManager.eyePosition, specifier: "%.2f")")
                         ProgressView(value: eyeTrackingManager.eyePosition)
                             .padding()
+                        Text("Mouse Position: (\(Int(mouseTracker.mousePosition.x)), \(Int(mouseTracker.mousePosition.y)))")
                     }
                     .padding()
                 } else {
@@ -206,7 +363,7 @@ struct ContentView: View {
                     .foregroundColor(.red)
             }
         }
-        .frame(width: 400, height: 400)
+        .frame(width: 400, height: 500)
         .padding()
     }
 }
