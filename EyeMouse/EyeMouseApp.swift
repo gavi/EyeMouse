@@ -27,49 +27,117 @@ class FaceMeshDrawingView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         
-        guard let context = NSGraphicsContext.current?.cgContext else { return }
-        context.setStrokeColor(NSColor.green.cgColor)
-        context.setLineWidth(2.0)
-        
-        guard let landmarks = faceLandmarks?.landmarks else { return }
+        guard let context = NSGraphicsContext.current?.cgContext,
+              let landmarks = faceLandmarks?.landmarks else { return }
         
         // Convert normalized coordinates to view coordinates
+        // Changed the y-coordinate conversion to match the correct orientation
         let convertPoint = { (point: CGPoint) -> CGPoint in
             return CGPoint(
                 x: point.x * self.bounds.width,
-                y: (1 - point.y) * self.bounds.height
+                y: point.y * self.bounds.height  // Removed the 1 - point.y conversion
             )
         }
         
-        // Draw function for points array
-        let drawPoints = { (points: [CGPoint]) in
+        // Helper function to draw closed shapes
+        let drawClosedShape = { (points: [CGPoint], color: NSColor) in
             guard let first = points.first else { return }
+            context.setStrokeColor(color.cgColor)
+            context.setLineWidth(2.0)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            
             let startPoint = convertPoint(first)
             context.move(to: startPoint)
             
             for point in points.dropFirst() {
-                let cgPoint = convertPoint(point)
-                context.addLine(to: cgPoint)
+                context.addLine(to: convertPoint(point))
+            }
+            context.addLine(to: startPoint)
+            context.strokePath()
+        }
+        
+        // Helper function to draw open shapes
+        let drawOpenShape = { (points: [CGPoint], color: NSColor) in
+            guard let first = points.first else { return }
+            context.setStrokeColor(color.cgColor)
+            context.setLineWidth(2.0)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            
+            let startPoint = convertPoint(first)
+            context.move(to: startPoint)
+            
+            for point in points.dropFirst() {
+                context.addLine(to: convertPoint(point))
             }
             context.strokePath()
         }
         
-        // Draw all available landmarks
-        if let allPoints = landmarks.allPoints?.normalizedPoints {
-            drawPoints(allPoints)
+        // Draw face outline
+        if let faceContour = landmarks.faceContour?.normalizedPoints {
+            drawOpenShape(faceContour, .init(red: 0.0, green: 0.8, blue: 0.3, alpha: 0.8))
         }
         
-        // Draw eyes with different color
-        context.setStrokeColor(NSColor.yellow.cgColor)
+        // Draw eyes with detailed styling
         if let leftEye = landmarks.leftEye?.normalizedPoints {
-            drawPoints(leftEye + [leftEye[0]])  // Close the eye contour
+            drawClosedShape(leftEye, .init(red: 1.0, green: 0.8, blue: 0.0, alpha: 0.9))
+            
+            // Draw pupil center point
+            if leftEye.count > 0 {
+                let center = leftEye.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+                let avgPoint = CGPoint(x: center.x / CGFloat(leftEye.count), y: center.y / CGFloat(leftEye.count))
+                let convertedCenter = convertPoint(avgPoint)
+                
+                context.setFillColor(NSColor.red.cgColor)
+                context.fillEllipse(in: CGRect(x: convertedCenter.x - 2, y: convertedCenter.y - 2, width: 4, height: 4))
+            }
         }
+        
         if let rightEye = landmarks.rightEye?.normalizedPoints {
-            drawPoints(rightEye + [rightEye[0]])  // Close the eye contour
+            drawClosedShape(rightEye, .init(red: 1.0, green: 0.8, blue: 0.0, alpha: 0.9))
+            
+            // Draw pupil center point
+            if rightEye.count > 0 {
+                let center = rightEye.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+                let avgPoint = CGPoint(x: center.x / CGFloat(rightEye.count), y: center.y / CGFloat(rightEye.count))
+                let convertedCenter = convertPoint(avgPoint)
+                
+                context.setFillColor(NSColor.red.cgColor)
+                context.fillEllipse(in: CGRect(x: convertedCenter.x - 2, y: convertedCenter.y - 2, width: 4, height: 4))
+            }
+        }
+        
+        // Draw eyebrows
+        if let leftEyebrow = landmarks.leftEyebrow?.normalizedPoints {
+            drawOpenShape(leftEyebrow, .init(red: 0.4, green: 0.8, blue: 1.0, alpha: 0.8))
+        }
+        
+        if let rightEyebrow = landmarks.rightEyebrow?.normalizedPoints {
+            drawOpenShape(rightEyebrow, .init(red: 0.4, green: 0.8, blue: 1.0, alpha: 0.8))
+        }
+        
+        // Draw nose
+        if let nose = landmarks.nose?.normalizedPoints {
+            drawOpenShape(nose, .init(red: 1.0, green: 0.4, blue: 0.4, alpha: 0.8))
+        }
+        
+        // Draw outer lips
+        if let outerLips = landmarks.outerLips?.normalizedPoints {
+            drawClosedShape(outerLips, .init(red: 1.0, green: 0.2, blue: 0.5, alpha: 0.8))
+        }
+        
+        // Draw inner lips
+        if let innerLips = landmarks.innerLips?.normalizedPoints {
+            drawClosedShape(innerLips, .init(red: 0.8, green: 0.2, blue: 0.4, alpha: 0.8))
+        }
+        
+        // Draw median line
+        if let medianLine = landmarks.medianLine?.normalizedPoints {
+            drawOpenShape(medianLine, .init(red: 0.3, green: 0.6, blue: 1.0, alpha: 0.6))
         }
     }
 }
-
 // MARK: - Eye Tracking Manager
 class EyeTrackingManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     @Published var isSetup = false
